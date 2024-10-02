@@ -13,7 +13,7 @@
 #include <errno.h>
 #include <linux/prctl.h>
 #include <sys/prctl.h>
-#include "pthread.h"
+#include <pthread.h>
 #include <sys/wait.h>
 #include <semaphore.h>
 
@@ -41,18 +41,8 @@ int main(int argc, char **argv) {
     char *errorPipeName = NULL;
 
     int option_index = 0;
-    while ((c = getopt_long(argc, argv, "+:i:o:e:", long_options, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "+i:o:e:", long_options, &option_index)) != -1) {
         switch (c) {
-            case 0:
-                /* If this option set a flag, do nothing else now. */
-                if (long_options[option_index].flag != 0)
-                    break;
-                printf("option %s", long_options[option_index].name);
-                if (optarg)
-                    printf(" with arg %s", optarg);
-                printf("\n");
-                break;
-
             case 'i':
                 inputPipeName = strdup(optarg);
                 break;
@@ -83,9 +73,10 @@ int main(int argc, char **argv) {
 
     int inputfd, outputfd, errorfd;
 
+    inputfd = outputfd = errorfd = -1;
 
-    //create input pipe if missing!
     if (inputPipeName != NULL) {
+        //create input pipe if missing!
         if (access(inputPipeName, F_OK)) {
             mkfifo(inputPipeName, 0666);
         }
@@ -100,11 +91,11 @@ int main(int argc, char **argv) {
             mkfifo(outputPipeName, 0666);
         }
 
-        int tmpfd = openPipe(outputPipeName, O_RDONLY | O_NONBLOCK);
+        int tmp = openPipe(outputPipeName, O_RDONLY | O_NONBLOCK);
 
         outputfd = openPipe(outputPipeName, O_WRONLY | O_NONBLOCK);
 
-        close(tmpfd);
+        close(tmp);
     }
 
     if (errorPipeName != NULL) {
@@ -113,16 +104,16 @@ int main(int argc, char **argv) {
             mkfifo(errorPipeName, 0666);
         }
 
-        int tmpfd = openPipe(errorPipeName, O_RDONLY | O_NONBLOCK);
+        int tmp = openPipe(errorPipeName, O_RDONLY | O_NONBLOCK);
 
         errorfd = openPipe(errorPipeName, O_WRONLY | O_NONBLOCK);
 
-        close(tmpfd);
+        close(tmp);
     }
 
-    int stdinFd[2];
-    int stdoutFd[2];
-    int stderrFd[2];
+    int stdinFd[2] = { -1, -1};
+    int stdoutFd[2] = { -1, -1};
+    int stderrFd[2] = { -1, -1};
 
     if (inputPipeName != NULL) {
         if (pipe(stdinFd)) {
@@ -150,9 +141,7 @@ int main(int argc, char **argv) {
 
     sprintf(sem_name,"ptee-%d", getpid());
 
-    /* initialize semaphores for shared processes */
     sem = sem_open (sem_name, O_CREAT | O_EXCL, 0644, 0);
-    /* name of semaphore is "pSem", semaphore is reached using this name */
 
     fprintf(stderr, "Starting %s with params: ", argv[optind]);
     int index;
@@ -160,14 +149,16 @@ int main(int argc, char **argv) {
         fprintf(stderr, "\"%s\" ", argv[index]);
     fprintf(stderr, "\n");
 
+    int origFd[3];
+    origFd[0] = dup(STDIN_FILENO);
+    origFd[1] = dup(STDOUT_FILENO);
+    origFd[2] = dup(STDERR_FILENO);
+
     pid_t pid = fork();
 
     if (pid < 0) {
-        /* cleanup semaphores */
         sem_unlink (sem_name);
         sem_close(sem);
-        /* unlink prevents the semaphore existing forever */
-        /* if a crash occurs during the execution         */
         perror("fork failed");
         exit(EXIT_FAILURE);
     }
@@ -176,22 +167,23 @@ int main(int argc, char **argv) {
         //child process
         //receive notice of parent death
         prctl(PR_SET_PDEATHSIG, SIGTERM);
-        int altErr = dup(STDERR_FILENO);
 
         //use our pipes
 
         if (inputPipeName != NULL) {
-            dup2(stdinFd[0], 0);
+            dup2(stdinFd[0], STDIN_FILENO);
             close(stdinFd[1]);
             close(inputfd);
         }
+
         if (outputPipeName != NULL) {
-            dup2(stdoutFd[1], 1);
+            dup2(stdoutFd[1], STDOUT_FILENO);
             close(stdoutFd[0]);
             close(outputfd);
         }
+
         if (errorPipeName != NULL) {
-            dup2(stderrFd[1], 2);
+            dup2(stderrFd[1], STDERR_FILENO);
             close(stderrFd[0]);
             close(errorfd);
         }
@@ -202,99 +194,88 @@ int main(int argc, char **argv) {
             perror("Error");
             exit(1);
         }
-        dprintf(altErr, "Bad Fork!");
+        dprintf(origFd[2], "Bad Fork!");
         exit(EXIT_FAILURE);
     }
+    else
+    {
 
-    if (inputPipeName != NULL) {
-        close(stdinFd[0]);
-    }
-
-    if (outputPipeName != NULL) {
-        close(stdoutFd[1]);
-    }
-
-    if (errorPipeName != NULL) {
-        close(stderrFd[1]);
-    }
-
-    pthread_t inputThread[2];
-
-
-    if (inputPipeName != NULL) {
-        int input1params[2] = {STDIN_FILENO, stdinFd[1]};
-        if (pthread_create(&inputThread[0], NULL, readInput, input1params)) {
-            /* cleanup semaphores */
-            sem_unlink (sem_name);
-            sem_close(sem);
-            /* unlink prevents the semaphore existing forever */
-            /* if a crash occurs during the execution         */
-            perror("Reader Thread 1 Failed");
-            exit(EXIT_FAILURE);
+        if (inputPipeName != NULL) {
+            close(stdinFd[0]);
         }
 
-        int input2params[2] = {inputfd, stdinFd[1]};
-        if (pthread_create(&inputThread[1], NULL, readInput, input2params)) {
-            /* cleanup semaphores */
-            sem_unlink (sem_name);
+        if (outputPipeName != NULL) {
+            close(stdoutFd[1]);
+        }
+
+        if (errorPipeName != NULL) {
+            close(stderrFd[1]);
+        }
+
+        pthread_t inputThread[2];
+
+
+        if (inputPipeName != NULL) {
+            int input1params[2] = {origFd[0], stdinFd[1]};
+            int input2params[2] = {inputfd, stdinFd[1]};
+
+            if (pthread_create(&inputThread[0], NULL, readInput, input2params)) {
+                sem_unlink(sem_name);
+                sem_close(sem);
+                perror("Reader Thread 1 Failed");
+                exit(EXIT_FAILURE);
+            }
+            //pthread_setname_np(&inputThread[0], "Input thread 1");
+
+            if (pthread_create(&inputThread[1], NULL, readInput, input1params)) {
+                sem_unlink(sem_name);
+                sem_close(sem);
+                perror("Reader Thread 2 Failed");
+                exit(EXIT_FAILURE);
+            }
+            //pthread_setname_np(&inputThread[1], "Input thread 2");
+        }
+
+        pthread_t outputThread;
+
+        if (outputPipeName != NULL) {
+            int outputParams[3] = {stdoutFd[0], origFd[1], outputfd};
+            if (pthread_create(&outputThread, NULL, readOutput, outputParams)) {
+                sem_unlink(sem_name);
+                sem_close(sem);
+                perror("Output Thread Failed");
+                exit(EXIT_FAILURE);
+            }
+            //pthread_setname_np(&outputThread, "Output thread");
+        }
+
+        pthread_t errorThread;
+
+        if (errorPipeName != NULL) {
+            int errorParams[3] = {stderrFd[0], origFd[2], errorfd};
+            if (pthread_create(&errorThread, NULL, readOutput, errorParams)) {
+                sem_unlink(sem_name);
+                sem_close(sem);
+                perror("Error Thread Failed");
+                exit(EXIT_FAILURE);
+            }
+            //pthread_setname_np(&errorThread, "Error thread");
+        }
+
+        //let the fork process start
+        sem_post(sem);
+
+        int retcode;
+        if (waitpid(pid, &retcode, WUNTRACED) < 0) {
+            sem_unlink(sem_name);
             sem_close(sem);
-            /* unlink prevents the semaphore existing forever */
-            /* if a crash occurs during the execution         */
-            perror("Reader Thread 2 Failed");
+            perror("Waitpid failed");
             exit(EXIT_FAILURE);
         }
-    }
-
-    pthread_t outputThread;
-
-    if (outputPipeName != NULL) {
-        int outputParams[3] = {stdoutFd[0], STDOUT_FILENO, outputfd};
-        if (pthread_create(&outputThread, NULL, readOutput, outputParams)) {
-            /* cleanup semaphores */
-            sem_unlink (sem_name);
-            sem_close(sem);
-            /* unlink prevents the semaphore existing forever */
-            /* if a crash occurs during the execution         */
-            perror("Output Thread Failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-
-    pthread_t errorThread;
-
-    if (errorPipeName != NULL) {
-        int errorParams[3] = {stderrFd[0], STDERR_FILENO, errorfd};
-        if (pthread_create(&errorThread, NULL, readOutput, errorParams)) {
-            /* cleanup semaphores */
-            sem_unlink (sem_name);
-            sem_close(sem);
-            /* unlink prevents the semaphore existing forever */
-            /* if a crash occurs during the execution         */
-            perror("Error Thread Failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    //let the fork process start
-    sem_post(sem);
-
-    int retcode;
-    if (waitpid(pid,&retcode, WUNTRACED) < 0) {
-        /* cleanup semaphores */
-        sem_unlink (sem_name);
+        sem_unlink(sem_name);
         sem_close(sem);
-        /* unlink prevents the semaphore existing forever */
-        /* if a crash occurs during the execution         */
-        perror("Waitpid failed");
-        exit(EXIT_FAILURE);
+        exit(WEXITSTATUS(retcode));
     }
-    /* cleanup semaphores */
-    sem_unlink (sem_name);
-    sem_close(sem);
-    /* unlink prevents the semaphore existing forever */
-    /* if a crash occurs during the execution         */
-    exit(WEXITSTATUS(retcode));
 }
 
 int openPipe(const char *pipeName, int mode) {
@@ -330,8 +311,11 @@ _Noreturn void *readInput(void *params) {
     ssize_t bytes;
     while (1) {
         bytes = read(readFd, buffer, sizeof(buffer));
-        if (bytes < 0 && errno == EINTR)
-            continue;
+        if (bytes < 0){
+            if (errno == EINTR)
+                continue;
+            break;
+        }
 
         (void) write(writeFd, buffer, bytes);
     }
@@ -345,8 +329,11 @@ _Noreturn void *readOutput(void *params) {
     ssize_t bytes;
     while (1) {
         bytes = read(readFd, buffer, sizeof(buffer));
-        if (bytes < 0 && errno == EINTR)
-            continue;
+        if (bytes < 0){
+            if (errno == EINTR)
+                continue;
+            break;
+        }
 
         (void) write(write1Fd, buffer, bytes);
         (void) write(write2Fd, buffer, bytes);
