@@ -10,7 +10,6 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdlib.h>
-#include <errno.h>
 #include <linux/prctl.h>
 #include <sys/prctl.h>
 #include <pthread.h>
@@ -21,6 +20,7 @@
 //--------------CONSTANTS-------------------
 
 static struct option long_options[] = {
+        {"pid-file",    required_argument, 0, 'p'},
         {"input-pipe",  required_argument, 0, 'i'},
         {"output-pipe", required_argument, 0, 'o'},
         {"error-pipe",  required_argument, 0, 'e'}
@@ -36,13 +36,17 @@ _Noreturn void *readOutput(void *params);
 int main(int argc, char **argv) {
     int c;
 
+    char *pidName = NULL;
     char *inputPipeName = NULL;
     char *outputPipeName = NULL;
     char *errorPipeName = NULL;
 
     int option_index = 0;
-    while ((c = getopt_long(argc, argv, "+i:o:e:", long_options, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "+p:i:o:e:", long_options, &option_index)) != -1) {
         switch (c) {
+            case 'p':
+                pidName = strdup(optarg);
+                break;
             case 'i':
                 inputPipeName = strdup(optarg);
                 break;
@@ -63,8 +67,8 @@ int main(int argc, char **argv) {
 
     if (argc <= optind) {
         fprintf(stderr, "Missing Required parameters\n");
-        fprintf(stderr, "Usage: ptee -i [inputPipe] -o [outputPipe] -e [errorPipe] [command to execute]\n");
-        fprintf(stderr, "Or: ptee -i [inputPipe] -o [outputPipe] -e [errorPipe] -- [command to execute]\n");
+        fprintf(stderr, "Usage: ptee -p [pidFile] -i [inputPipe] -o [outputPipe] -e [errorPipe] [command to execute]\n");
+        fprintf(stderr, "Or: ptee -p [pidFile] -i [inputPipe] -o [outputPipe] -e [errorPipe] -- [command to execute]\n");
         exit(EXIT_FAILURE);
     }
 
@@ -82,6 +86,9 @@ int main(int argc, char **argv) {
         }
 
         inputfd = openPipe(inputPipeName, O_RDONLY | O_NONBLOCK);
+        int tmp = openPipe(inputPipeName, O_WRONLY | O_NONBLOCK);
+
+        close(tmp);
 
     }
 
@@ -111,9 +118,9 @@ int main(int argc, char **argv) {
         close(tmp);
     }
 
-    int stdinFd[2] = { -1, -1};
-    int stdoutFd[2] = { -1, -1};
-    int stderrFd[2] = { -1, -1};
+    int stdinFd[2] = {-1, -1};
+    int stdoutFd[2] = {-1, -1};
+    int stderrFd[2] = {-1, -1};
 
     if (inputPipeName != NULL) {
         if (pipe(stdinFd)) {
@@ -139,9 +146,9 @@ int main(int argc, char **argv) {
     char sem_name[5 + 22];
     sem_t *sem;
 
-    sprintf(sem_name,"ptee-%d", getpid());
+    sprintf(sem_name, "ptee-%d", getpid());
 
-    sem = sem_open (sem_name, O_CREAT | O_EXCL, 0644, 0);
+    sem = sem_open(sem_name, O_CREAT | O_EXCL, 0644, 0);
 
     fprintf(stderr, "Starting %s with params: ", argv[optind]);
     int index;
@@ -157,7 +164,7 @@ int main(int argc, char **argv) {
     pid_t pid = fork();
 
     if (pid < 0) {
-        sem_unlink (sem_name);
+        sem_unlink(sem_name);
         sem_close(sem);
         perror("fork failed");
         exit(EXIT_FAILURE);
@@ -196,9 +203,19 @@ int main(int argc, char **argv) {
         }
         dprintf(origFd[2], "Bad Fork!");
         exit(EXIT_FAILURE);
-    }
-    else
-    {
+    } else {
+
+        if (pidName != NULL) {
+            FILE *fp = fopen(pidName, "w");
+            if (fp == NULL){
+                sem_unlink(sem_name);
+                sem_close(sem);
+                perror("Pid file failed!");
+                exit(EXIT_FAILURE);
+            }
+            fprintf(fp, "%d", pid);
+            fclose(fp);
+        }
 
         if (inputPipeName != NULL) {
             close(stdinFd[0]);
@@ -311,11 +328,8 @@ _Noreturn void *readInput(void *params) {
     ssize_t bytes;
     while (1) {
         bytes = read(readFd, buffer, sizeof(buffer));
-        if (bytes < 0){
-            if (errno == EINTR)
-                continue;
-            break;
-        }
+        if (bytes <= 0)
+            continue;
 
         (void) write(writeFd, buffer, bytes);
     }
@@ -329,11 +343,8 @@ _Noreturn void *readOutput(void *params) {
     ssize_t bytes;
     while (1) {
         bytes = read(readFd, buffer, sizeof(buffer));
-        if (bytes < 0){
-            if (errno == EINTR)
-                continue;
-            break;
-        }
+        if (bytes <= 0)
+            continue;
 
         (void) write(write1Fd, buffer, bytes);
         (void) write(write2Fd, buffer, bytes);
