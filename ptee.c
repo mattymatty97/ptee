@@ -32,6 +32,11 @@ _Noreturn void *readInput(void *params);
 
 _Noreturn void *readOutput(void *params);
 
+struct threadArgs {
+    int param1;
+    int param2;
+    int param3;
+};
 
 int main(int argc, char **argv) {
     int c;
@@ -86,9 +91,6 @@ int main(int argc, char **argv) {
         }
 
         inputfd = openPipe(inputPipeName, O_RDONLY | O_NONBLOCK);
-        int tmp = openPipe(inputPipeName, O_WRONLY | O_NONBLOCK);
-
-        close(tmp);
 
     }
 
@@ -233,10 +235,14 @@ int main(int argc, char **argv) {
 
 
         if (inputPipeName != NULL) {
-            int input1params[2] = {origFd[0], stdinFd[1]};
-            int input2params[2] = {inputfd, stdinFd[1]};
+            struct threadArgs* input1params = calloc(1,sizeof (struct threadArgs));
+            input1params->param1 = origFd[0];
+            input1params->param2 = stdinFd[1];
+            struct threadArgs* input2params = calloc(1,sizeof (struct threadArgs));
+            input2params->param1 = inputfd;
+            input2params->param2 = stdinFd[1];
 
-            if (pthread_create(&inputThread[0], NULL, readInput, input2params)) {
+            if (pthread_create(&inputThread[0], NULL, readInput, (void*)input1params)) {
                 sem_unlink(sem_name);
                 sem_close(sem);
                 perror("Reader Thread 1 Failed");
@@ -244,7 +250,7 @@ int main(int argc, char **argv) {
             }
             //pthread_setname_np(&inputThread[0], "Input thread 1");
 
-            if (pthread_create(&inputThread[1], NULL, readInput, input1params)) {
+            if (pthread_create(&inputThread[1], NULL, readInput, (void*)input2params)) {
                 sem_unlink(sem_name);
                 sem_close(sem);
                 perror("Reader Thread 2 Failed");
@@ -256,7 +262,10 @@ int main(int argc, char **argv) {
         pthread_t outputThread;
 
         if (outputPipeName != NULL) {
-            int outputParams[3] = {stdoutFd[0], origFd[1], outputfd};
+            struct threadArgs* outputParams = calloc(1,sizeof (struct threadArgs));
+            outputParams->param1 = stdoutFd[0];
+            outputParams->param2 = origFd[1];
+            outputParams->param3 = outputfd;
             if (pthread_create(&outputThread, NULL, readOutput, outputParams)) {
                 sem_unlink(sem_name);
                 sem_close(sem);
@@ -322,8 +331,9 @@ int openPipe(const char *pipeName, int mode) {
 }
 
 _Noreturn void *readInput(void *params) {
-    int readFd = ((int *) params)[0];
-    int writeFd = ((int *) params)[1];
+    struct threadArgs *args = params;
+    int readFd = args->param1;
+    int writeFd = args->param2;
     char buffer[BUFSIZ];
     ssize_t bytes;
     while (1) {
@@ -336,9 +346,10 @@ _Noreturn void *readInput(void *params) {
 }
 
 _Noreturn void *readOutput(void *params) {
-    int readFd = ((int *) params)[0];
-    int write1Fd = ((int *) params)[1];
-    int write2Fd = ((int *) params)[2];
+    struct threadArgs *args = params;
+    int readFd = args->param1;
+    int write1Fd = args->param2;
+    int write2Fd = args->param3;
     char buffer[BUFSIZ];
     ssize_t bytes;
     while (1) {
